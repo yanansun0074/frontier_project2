@@ -1,0 +1,99 @@
+---
+title: "Frontier 2 EDA"
+format: html
+---
+
+Cmd + Shift + I: Add new cell
+
+```{python}
+import pandas as pd
+
+```
+
+```{python}
+NOW = pd.read_csv('NOW_Shed_Permits_2.csv')
+DOB = pd.read_csv('DOB_Shed_Permits_2.csv')
+NOW = NOW[['job__', 'address', 'created_date', 'expired_date', 'renewal_count', 'active']]
+DOB = DOB[['job__', 'address', 'created_date', 'expired_date', 'renewal_count', 'active']]
+
+
+permits = pd.concat([DOB, NOW])
+permits = permits.drop_duplicates(subset = 'job__')
+
+permits.info()
+
+```
+
+New sidewalk shed permits by month
+```{python}
+
+permits['created_date'] = pd.to_datetime(permits['created_date'])
+
+month = permits.groupby(permits['created_date'].dt.to_period('M')).size().reset_index()
+
+month.columns = ['Month', 'Count']
+
+month.head()
+
+```
+
+
+```{python}
+# !pip install altair
+import altair as alt
+
+month['Month'] = month['Month'].astype(str)
+
+alt.Chart(month).mark_line().encode(
+    x = "Month",
+    y = "Count"
+)
+
+```
+
+New shed permits by year
+Again, ignore 2024 because the data is till early 2024
+```{python}
+
+year = permits.groupby(permits['created_date'].dt.to_period('Y')).size().reset_index()
+
+year.columns = ['Year', 'Count']
+
+year['Year'] = year['Year'].astype(str)
+
+alt.Chart(year).mark_line().encode(
+    x = "Year",
+    y = alt.Y("Count", title = "Number of new sidewalk shed permits")
+)
+```
+
+
+```{python}
+permits['expired_date'] = pd.to_datetime(permits['expired_date'])
+
+down = permits[permits['active']== False]
+
+down_month = down.groupby(down['expired_date'].dt.to_period('M')).size().reset_index()
+
+down_month.columns = ['Month', 'Count']
+down_month['Month'] = down_month['Month'].astype(str)
+
+alt.Chart(down_month).mark_line().encode(
+    x = "Month",
+    y = alt.Y("Count", title = "Number of expired sidewalk shed permits")
+)
+```
+
+
+```{python}
+
+down_year = down.groupby(down['expired_date'].dt.to_period('Y')).size().reset_index()
+
+down_year.columns = ['Year', 'Count']
+down_year['Year'] = down_year['Year'].astype(str)
+
+alt.Chart(down_year).mark_line().encode(
+    x = "Year",
+    y = alt.Y("Count", title = "Number of expired sidewalk shed permits")
+)
+```
