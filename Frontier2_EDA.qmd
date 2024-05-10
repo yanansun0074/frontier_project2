@@ -4,7 +4,7 @@ format: html
 ---
 
 Cmd + Shift + I: Add new cell
-
+### Number of new sidewalk shed / expired sidewalk shed permits
 ```{python}
 import pandas as pd
 
@@ -27,12 +27,9 @@ permits.info()
 New sidewalk shed permits by month
 ```{python}
 
-permits['created_date'] = pd.to_datetime(permits['created_date'])
-
+permits['created_date'] = pd.to_datetime(permits['created_date'], format='ISO8601')
 month = permits.groupby(permits['created_date'].dt.to_period('M')).size().reset_index()
-
 month.columns = ['Month', 'Count']
-
 month.head()
 
 ```
@@ -97,3 +94,231 @@ alt.Chart(down_year).mark_line().encode(
     y = alt.Y("Count", title = "Number of expired sidewalk shed permits")
 )
 ```
+
+
+Time series modeling
+```{r}
+install.packages("mgcv")
+library(mgcv)
+install.packages("car")
+library(car)
+library(ggplot2)
+```
+
+```{r}
+gam_create_month <- gam(Count ~ s(Month, bs = "cr"),
+    data = month,
+    family = gaussian
+)
+```
+
+
+## Apr 25, 2024
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+```
+
+### Data cleaning 
+#### DOB + DOB NOW individual permit records
+Cleaning
+
+DOB NOW data
+```{r}
+NOW <- read_csv("DOB_NOW__Build___Approved_Permits_20240425.csv")
+
+names(NOW)[names(NOW) == "Issued Date"] <- "issued_date"
+names(NOW)[names(NOW) == "Expired Date"] <- "expired_date"
+names(NOW)[names(NOW) == "Job Filing Number"] <- "job__"
+names(NOW)[names(NOW) == "Work Type"] <- "work_type"
+names(NOW)[names(NOW) == "House No"] <- "house_no"
+names(NOW)[names(NOW) == "Street Name"] <- "street_name"
+names(NOW)[names(NOW) == "C_B_NO"] <- "c_b_no"
+
+NOW_shed <- NOW %>%
+    mutate(
+        issued_date = parse_date_time(NOW$issued_date, orders = c("ymd_HMS", "mdy_HMS")),
+        expired_date = parse_date_time(NOW$expired_date, orders = c("ymd_HMS", "mdy_HMS")),
+        address = paste(house_no, street_name),
+    ) %>%
+    filter(
+        work_type == "Sidewalk Shed",
+        is.na(issued_date) == FALSE,
+    ) %>%
+    select(
+        job__, issued_date, expired_date, address, Borough, LOT, Bin, Block, c_b_no
+    )
+
+NOW_shed2 <- NOW_shed[!duplicated(NOW_shed[c("job__", "issued_date")]) == TRUE, ]
+
+# NOW does not have lat/long data
+NOW_shed2$LATITUDE <- 0
+NOW_shed2$LONGITUDE <- 0
+NOW_shed2$CENSUS_TRACT <- 0
+
+```
+
+Write all DOB NOW shed data locally
+```{r}
+NOW <- read.csv("NOW_Sheds_Permit_Issuance_20240425.csv")
+
+NOW_S <- NOW %>% filter(
+    work_type == "Sidewalk Shed"
+)  %>% 
+    mutate(
+        issued_date = parse_date_time(NOW$issued_date, orders = c("ymd_HMS", "mdy_HMS")),      # parse time
+        expired_date = parse_date_time(NOW$expired_date, orders = c("ymd_HMS", "mdy_HMS")),
+        address = paste(house_no, street_name),                                              # edit address
+    )
+
+write.csv(NOW_S, "NOW_Sheds_Permit_Issuance_20240425.csv", row.names = FALSE)
+```
+
+
+DOB data
+```{r}
+DOB <- read_csv("DOB_Permit_Issuance_20240425.csv")
+
+names(DOB)[names(DOB) == "Issuance Date"] <- "issued_date"
+names(DOB)[names(DOB) == "Expiration Date"] <- "expired_date"
+names(DOB)[names(DOB) == "Job #"] <- "job__"
+names(DOB)[names(DOB) == "Permit Subtype"] <- "permit_subtype"
+names(DOB)[names(DOB) == "House #"] <- "house_no"
+names(DOB)[names(DOB) == "Street Name"] <- "street_name"
+names(DOB)[names(DOB) == "Bin #"] <- "Bin"
+names(DOB)[names(DOB) == "Community Board"] <- "c_b_no"
+names(DOB)[names(DOB) == "BOROUGH"] <- "Borough"
+names(DOB)[names(DOB) == "Lot"] <- "LOT"
+
+DOB_shed <- DOB %>%
+    mutate(
+        issued_date = parse_date_time(DOB$issued_date, orders = c("mdy", "ymd")),
+        expired_date = parse_date_time(DOB$expired_date, orders = c("mdy", "ymd")),
+        address = paste(house_no, street_name),
+    ) %>%
+    filter(
+        permit_subtype == "SH",
+        is.na(issued_date) == FALSE,
+    ) %>%
+    select(
+        job__, issued_date, expired_date, address, Borough, LOT, Bin, Block, c_b_no, LATITUDE, LONGITUDE, CENSUS_TRACT
+    )
+
+DOB_shed2 <- DOB_shed[!duplicated(DOB_shed[c("job__", "issued_date")]), ]
+
+```
+
+
+Write all information about DOB sidewalk shed permits locally
+```{r}
+DOB <- read.csv("DOB_Sheds_Permit_Issuance_20240425.csv")
+
+DOB_S <- DOB %>% filter(
+    permit_subtype == "SH"
+) %>% mutate(
+    issued_date = parse_date_time(DOB$issued_date, orders = c("mdy", "ymd")),               # Parse date
+        expired_date = parse_date_time(DOB$expired_date, orders = c("mdy", "ymd")),
+        address = paste(house_no, street_name)                                              # Edit address for geocoding
+)
+
+# Write locally
+write.csv(DOB_S, "DOB_Sheds_Permit_Issuance_20240425.csv", row.names = FALSE)
+```
+
+Combine DOB + NOW data
+```{r}
+sheds <- rbind(NOW_shed2, DOB_shed2) %>%
+    mutate(renew_time = difftime(expired_date, issued_date, units = "days")) %>%
+    filter(renew_time > 0)
+```
+
+Write combined shed data
+```{r}
+write.csv(sheds, "Combined_Sheds_Permits.csv", row.names = FALSE)
+```
+
+#### Write permits + parse created month & year
+```{python}
+import pandas as pd
+
+sheds = pd.read_csv('Combined_Sheds_Permits.csv')
+
+sheds['issued_month'] = pd.DatetimeIndex(pd.to_datetime(sheds['issued_date'], format='%Y-%m-%d %H:%M:%S')).month
+sheds['issued_year'] = pd.DatetimeIndex(pd.to_datetime(sheds['issued_date'], format='%Y-%m-%d %H:%M:%S')).year
+sheds['expired_month'] = pd.DatetimeIndex(pd.to_datetime(sheds['expired_date'], format='%Y-%m-%d %H:%M:%S')).month
+sheds['expired_year'] = pd.DatetimeIndex(pd.to_datetime(sheds['expired_date'], format='%Y-%m-%d %H:%M:%S')).year
+
+sheds.to_csv("Combined_Sheds_Permits_1.csv", index = False)
+
+```
+
+
+### EDA for renewal time changes
+
+```{r}
+sheds <- read.csv("Combined_Sheds_Permits.csv")
+```
+
+Each renewal time as scatter plot
+```{r}
+ggplot(sheds, aes(x = issued_date, y = renew_time)) +
+    geom_point() +
+    theme(axis.text.x = element_text(angle = 60, hjust = 1))
+```
+
+Scatter plot after 2023-07-01
+```{r}
+down <- sheds %>% filter(issued_date > "2023-07-01")
+
+ggplot(down, aes(x = issued_date, y = renew_time)) +
+    geom_point() +
+    theme(axis.text.x = element_text(angle = 60, hjust = 1))
+```
+
+Aggregate by day
+```{r}
+sheds_day <- sheds %>%
+    group_by(issued_date) %>%
+    summarize(
+        total_time = sum(renew_time),
+        count = n(),
+        ave_time = total_time / count
+    )
+
+ggplot(sheds_day, aes(x = issued_date, y = ave_time)) +
+    geom_line() +
+    theme(axis.text.x = element_text(angle = 60, hjust = 1))
+
+```
+
+Aggregate by day after 2019
+Seems that there is some data missing between 2014 - 2018
+
+The average renewal length is obviously decreasing, but still much longer from the statement in the policy: "Shed permits will have a timespan of 90 days moving forward, down from the 12 months previously allowed".
+```{r}
+sheds_day_2019 <- sheds_day %>%
+    filter(issued_date > "2019-01-01")
+
+ggplot(sheds_day_2019, aes(x = issued_date, y = ave_time)) +
+    geom_point() +
+    theme(axis.text.x = element_text(angle = 60, hjust = 1))
+```
+
+What's the black line here: = 365 days
+```{r}
+a <- as.data.frame(table(sheds_day_2019$ave_time))
+
+a[a$Freq == 716, ]
+# sort(a$Freq, decreasing = TRUE)
+```
+
+
+many permits comply to the policy / percentage of permits below 90 days
+* Who are these people 
+percentage of permits under 90 days
+
+
+
+
+

@@ -1,0 +1,497 @@
+---
+title: "Frontier2_Modeling"
+format: html
+editor: visual
+---
+
+## Data cleaning
+
+
+```{python}
+import pandas as pd
+
+NOW = pd.read_csv('NOW_Shed_Permits_2.csv')
+DOB = pd.read_csv('DOB_Shed_Permits_2.csv')
+NOW = NOW[['job__', 'address', 'created_date', 'expired_date', 'renewal_count', 'active']]
+DOB = DOB[['job__', 'address', 'created_date', 'expired_date', 'renewal_count', 'active']]
+
+
+permits = pd.concat([DOB, NOW])
+permits = permits.drop_duplicates(subset = 'job__')
+
+# Created date / month / year
+permits['created_date'] = pd.to_datetime(permits['created_date'], format='ISO8601')
+permits['created_month'] = pd.DatetimeIndex(permits['created_date']).month
+permits['created_year'] = pd.DatetimeIndex(permits['created_date']).year
+
+# Expired date / month / year
+permits['expired_date'] = pd.to_datetime(permits['expired_date'], format='ISO8601')
+permits['expired_month'] = pd.DatetimeIndex(permits['expired_date']).month
+permits['expired_year'] = pd.DatetimeIndex(permits['expired_date']).year
+
+permits['Age'] = (permits['expired_date'] - permits['created_date']).dt.days
+
+
+# permits['Age'] = permits['expired_date'] - permits['created_date']
+permits.head()
+permits.to_csv("Permits.csv", index = False)
+```
+
+```{r}
+library(tidyverse)
+library(sf)
+library(tidycensus)
+# install.packages("DHARMa")
+library(DHARMa)
+# install.packages("mgcv")
+library(mgcv)
+# install.packages("reticulate")
+library(reticulate)
+# install.packages("dplyr")
+library(dplyr)
+library(lubridate)
+```
+
+```{r}
+permits <- read.csv("Permits.csv")
+permits <- permits %>% filter(Age > 0)
+
+new_permits_by_m <- permits %>%
+    group_by(created_date) %>%
+    summarize(
+        count = n(),
+        year = created_year[1],
+        month = created_month[1]
+    )
+```
+
+#### DOB NOW join with "BIN" in building footage data
+
+```{r}
+NOW <- read.csv("NOW_Sheds_Permit_Issuance_20240425.csv")
+NOW_shed <- NOW %>%
+    mutate(
+        issued_date = parse_date_time(NOW$issued_date, orders = c("ymd_HMS", "mdy_HMS")),
+        expired_date = parse_date_time(NOW$expired_date, orders = c("ymd_HMS", "mdy_HMS")),
+        address = paste(house_no, street_name),
+    ) %>%
+    filter(
+        work_type == "Sidewalk Shed",
+        is.na(issued_date) == FALSE,
+    ) %>%
+    select(
+        job__, issued_date, expired_date, address, Borough, LOT, Bin, Block, c_b_no
+    )
+
+NOW_shed2 <- NOW_shed[!duplicated(NOW_shed["job__"]) == TRUE, ]
+
+# NOW does not have lat/long data
+NOW_shed2$LATITUDE <- 0
+NOW_shed2$LONGITUDE <- 0
+NOW_shed2$CENSUS_TRACT <- 0
+```
+
+```{r}
+# Get building footprints data
+building <- read_sf("Building Footprints.geojson")
+
+building_2 <- building %>%
+    rename(Bin = bin) %>%
+    select(geometry, name, Bin)
+
+building_2 <- building_2[!duplicated(building_2["Bin"]) == TRUE, ] %>% mutate(Bin = as.double(Bin))
+
+# Join building with NOW_shed by "Bin"
+NOW_shed_geo <- left_join(NOW_shed2, building_2) %>%
+    filter(!st_is_empty(geometry)) %>%
+    st_as_sf()
+```
+
+```{r}
+# There are still 3509 empty geometry (should be encode with geocoding?)
+NOW_shed_geo_empty <- left_join(NOW_shed2, building_2) %>%
+    filter(st_is_empty(geometry))
+nrow(NOW_shed_geo_empty) # 3509
+```
+
+Write 3509 empty sidewalk shed and use geocodio.io to get lat/lon
+```{r}
+write.csv(NOW_shed_geo_empty, "NOW_empty_shed.csv", row.names = FALSE)
+```
+
+```{r}
+geocode <- read_sf("NOW_empty_shed.csv") %>%
+    select(address, c_b_no, Borough) %>%
+    slice(2501:3509) # 2500 / 3509
+write.csv(geocode, "geocode_2.csv", row.names = FALSE)
+```
+
+Check and correct geocoding results with low accuracy
+```{r}
+extra_geocoded <- rbind(geocoded_1, geocoded_2) %>%
+    filter(Accuracy.Score < 0.5) %>%
+    select(address, Latitude, Longitude)
+view(extra_geocoded)
+```
+
+Geocoded (after manual checking and correction)
+```{r}
+geocoded_1 <- read.csv("geocoded_1.csv") %>% select(address, Latitude, Longitude)
+geocoded_2 <- geocoded_1[!duplicated(geocoded_1["address"]) == TRUE, ]
+
+# join with empty_shed
+empty <- read.csv("NOW_empty_shed.csv") %>% select(-LATITUDE, -LONGITUDE, -geometry, -name, -CENSUS_TRACT)
+NOW_shed_geo_e <- left_join(empty, geocoded_2) %>%
+    drop_na(Latitude) %>%
+    st_as_sf(
+        coords = c("Longitude", "Latitude"),
+        crs = 4326
+    ) %>%
+    st_transform(4326)
+```
+
+#### St_join DOB NOW shed data with census tract
+
+```{r}
+my_counties <- c("New York County", "Bronx County", "Queens County", "Kings County", "Richmond County")
+
+D_ACS <- get_acs(
+    year = 2020,
+    geography = "tract",
+    state = "NY",
+    county = my_counties,
+    variables = c(
+        med_inc = "B19013_001",
+        white = "B02001_002",
+        black = "B02001_003",
+        poverty = "B17001_002"
+    ),
+    summary_var = "B01003_001",
+    geometry = TRUE
+) %>%
+    dplyr::select(-moe, -summary_moe) %>%
+    pivot_wider(names_from = "variable", values_from = "estimate") %>%
+    st_as_sf() %>%
+    mutate(
+        black_perc = black / summary_est,
+        pov_perc = poverty / summary_est,
+    ) %>%
+    dplyr::select(-black, -poverty) %>%
+    st_set_crs(4326)
+```
+
+* St_join
+```{r}
+# non-empty sidewalk shed after joining with footprint data
+NOW_shed_acs <- st_join(D_ACS, NOW_shed_geo, join = st_intersects, left = FALSE)
+
+NOW_shed_acs_2 <- NOW_shed_acs %>%
+    st_as_sf() %>%
+    rename_with(.fn = ~ make.unique(.), .cols = everything()) %>%
+    select(-name)
+st_write(NOW_shed_acs_2, "NOW_nonempty_shed_ACS.geojson")
+
+# St_join geocoded sidewalk shed data
+NOW_shed_acs_e <- st_join(D_ACS, NOW_shed_geo_e, join = st_intersects, left = FALSE)
+
+```
+
+```{r}
+NOW_shed_geo_e <- read_sf("NOW_empty_shed.csv") %>%
+    mutate(
+        issued_date = as.Date(issued_date),
+        expired_date = as.Date(expired_date)
+    ) %>%
+    select(-geometry, -name, -CENSUS_TRACT) %>%
+    st_as_sf(
+        coords = c("LONGITUDE", "LATITUDE"),
+        crs = 4326
+    )
+
+# Get empty NOW shed join with acs
+NOW_shed_acs_e <- st_join(D_ACS, NOW_shed_geo_e, join = st_intersects, left = FALSE)
+```
+
+
+```{r}
+# Combine all NOW data
+NOW_shed_acs_2 <- read_sf("NOW_nonempty_shed_ACS.geojson") %>% select(-LATITUDE, -LONGITUDE, -CENSUS_TRACT)
+NOW_acs <- rbind(NOW_shed_acs_2, NOW_shed_acs_e)
+
+```
+
+
+
+#### St_join DOB shed data with census tract
+```{r}
+DOB_sheds <- read.csv("DOB_Shed_Permits_2.csv") %>%
+    select(-census_tract, -created_year, -expired_year, -expired_month, -renewal_count) %>%
+    filter(
+        is.na(lat) == FALSE,
+        is.na(long) == FALSE
+    ) %>%
+    mutate(
+        created_date = as.Date(created_date),
+        expired_date = as.Date(expired_date)
+    ) %>%
+    st_as_sf(coords = c("long", "lat"), crs = 4326) %>%
+    st_transform(4326)
+```
+
+```{r}
+DOB_sheds_acs <- st_join(D_ACS, DOB_sheds, join = st_intersects, left = FALSE) %>%
+    rename(
+        issued_date = created_date,
+        Bin = bin,
+        Borough = borough,
+    ) %>%
+    select(-active)
+
+NOW_sheds_acs <- NOW_acs %>% select(-LOT, -Block)
+
+# Combine NOW and DOB with acs data
+sheds_acs <- rbind(DOB_sheds_acs, NOW_sheds_acs)
+summary(sheds_acs)
+```
+
+```{r}
+# Write for future uses
+st_write(sheds_acs, "sheds_acs_corrected.geojson")
+```
+
+## Model total age as time goes to year and month
+```{r}
+mod <- gam(Age ~ s(created_year, k = 3) + s(created_month, bs = "cc") + renewal_count,
+    family = nb(link = "log"), data = permits
+)
+```
+
+```{r}
+summary(mod)
+```
+
+```{r}
+plot(mod, seWithMean = TRUE, trans = exp, shift = coef(mod)[1], scale = 0, pages = 1)
+```
+
+```{r}
+resid <- simulateResiduals(mod)
+plot(resid, smoothScatter = FALSE)
+```
+
+## Model new permits by month
+```{r}
+mod_2 <- gam(count ~ s(year, k = 3) + s(month, bs = "cc"),
+    family = nb(), data = new_permits_by_m
+)
+summary(mod_2)
+```
+
+```{r}
+plot(mod_2, seWithMean = TRUE, trans = exp, shift = coef(mod)[1], scale = 0, pages = 1)
+```
+
+```{r}
+resid <- simulateResiduals(mod_2)
+plot(resid)
+```
+
+## Model renewal count by time 
+
+```{r}
+mod_3 <- gam(renewal_count ~ s(created_year, k = 3) + s(created_month, bs = "cc"),
+    family = nb(), data = permits
+)
+
+summary(mod_3)
+```
+
+```{r}
+plot(mod_3, seWithMean = TRUE, trans = exp, shift = coef(mod_3)[1], scale = 0, pages = 1)
+```
+
+```{r}
+resid <- simulateResiduals(mod_3)
+plot(resid)
+```
+
+## Model renewal duration by time
+
+* For Manhattan sidewalk sheds
+```{r}
+sheds <- read.csv("Combined_Sheds_Permits_1.csv")
+
+m_sheds <- sheds %>% filter(Borough == "MANHATTAN")
+
+mod <- gam(renew_time ~ s(issued_year, k = 3) + s(issued_month, bs = "cc"),
+    family = nb(link = "log"), data = m_sheds
+)
+```
+
+```{r}
+summary(mod)
+```
+
+```{r}
+plot(mod, seWithMean = TRUE, trans = exp, shift = coef(mod)[1], scale = 0, pages = 1)
+```
+
+```{r}
+resid <- simulateResiduals(mod)
+plot(resid, smoothScatter = FALSE)
+```
+
+* For all the sidewalk sheds:
+```{r}
+mod <- gam(renew_time ~ s(issued_year, k = 3) + s(issued_month, bs = "cc"),
+    family = nb(link = "log"), data = sheds
+)
+```
+
+```{r}
+summary(mod)
+```
+
+```{r}
+plot(mod, seWithMean = TRUE, trans = exp, shift = coef(mod)[1], scale = 0, pages = 1)
+```
+
+```{r}
+resid <- simulateResiduals(mod)
+plot(resid, smoothScatter = FALSE)
+```
+
+
+## Time series modeling
+
+```{r}
+sheds_acs <- st_read("sheds_acs_corrected.geojson")
+
+# Change date format for modeling
+sheds_acs_2 <- sheds_acs %>%
+    mutate(
+        issued_date = as.Date(issued_date),
+        expired_date = as.Date(expired_date),
+        issued_month = as.integer(format(issued_date, "%m")),
+        issued_year = as.integer(format(issued_date, "%Y")),
+        expired_month = as.integer(format(expired_date, "%m")),
+        expired_year = as.integer(format(expired_date, "%Y")),
+        renewal_time = as.numeric(expired_date - issued_date),
+        is_23 = issued_year == 2023, # Add an interaction factor of year of renewal (2023 vs. others)
+        is_2023 = factor(is_23)
+    ) %>%
+    filter(renewal_time >= 0)
+
+```
+
+```{r}
+summary(sheds_acs_2)
+# 147395
+```
+
+
+```{r}
+dob <- read.csv("DOB_Sheds_Permit_Issuance_20240425.csv")
+now <- read.csv("NOW_Sheds_Permit_Issuance_20240425.csv")
+
+
+# Get job__ issued_date expired_date Filing.Status
+unique(dob$Filing.Status)
+# [1] "INITIAL" "RENEWAL"
+
+dob_2 <- dob %>%
+    rename(filing_status = Filing.Status) %>%
+    mutate(
+        issued_date = as.Date(issued_date),
+        expired_date = as.Date(expired_date)
+    ) %>%
+    select(job__, issued_date, expired_date, filing_status)
+
+
+# From DOB NOW: get [job__, issued_date, expired_date, Filing.Reason]
+
+unique(now$Filing.Reason)
+# [1] "Initial Permit"                 "Renewal Permit Without Changes"
+# [3] "Renewal Permit with Changes"    "No Work Permit"
+
+now_2 <- now %>%
+    rename(filing_status = Filing.Reason) %>%
+    mutate(
+        issued_date = as.Date(issued_date),
+        expired_date = as.Date(expired_date),
+        filing_status = ifelse(filing_status == "Initial Permit", "INITIAL", "RENEWAL")
+    ) %>%
+    select(job__, issued_date, expired_date, filing_status)
+
+# Bind two datasets
+sheds_2 <- rbind(dob_2, now_2) %>% distinct()
+
+# Join with shed census tract data
+sheds_acs_3 <- left_join(sheds_acs_2, sheds_2) %>%
+    mutate(status = factor(filing_status))
+
+
+# Write locally
+# st_write(sheds_acs_3, "sheds_acs_corrected_2.geojson")
+
+```
+
+Modeling
+```{r}
+mod_acs <- bam(renewal_time ~ s(issued_year, k = 3) + s(issued_month, bs = "cc") + s(pov_perc) + s(black_perc) + s(bs = "sz", issued_month, by = is_2023),
+    # family = nb(link = "log"), data = sheds_acs_2
+    family = Gamma(), data = sheds_acs_2
+)
+```
+
+```{r}
+summary(mod_acs)
+```
+
+```{r}
+plot(mod_acs, seWithMean = TRUE, trans = exp, shift = coef(mod_acs)[1], scale = 0, page = 1)
+```
+
+```{r}
+resid <- simulateResiduals(mod_acs)
+plot(resid, smoothScatter = FALSE)
+```
+
+
+
+## Percentage of permits with duration longer than 90 days
+```{r}
+# By day
+renew_perc <- sheds_acs_2 %>%
+    mutate(shorter_90 = renewal_time <= 90) %>%
+    group_by(issued_date) %>%
+    summarize(
+        count = n(),
+        perc = sum(shorter_90) / count
+    )
+summary(renew_perc)
+```
+
+```{r}
+# By month
+renew_perc_2019 <- sheds_acs_2 %>%
+    filter(issued_year >= 2019) %>%
+    mutate(shorter_90 = renewal_time <= 90) %>%
+    group_by(month = lubridate::floor_date(issued_date, "month")) %>%
+    summarize(
+        count = n(),
+        perc = sum(shorter_90) / count
+    )
+```
+
+```{r}
+p <- ggplot(renew_perc_2019, aes(x = month, y = perc)) +
+    geom_line() +
+    xlab("") +
+    theme_bw() +
+    labs(
+        title = "Percentage of Sidewalk Shed Permits with Duration Shorter than 90 Day (by Month)",
+        x = "Perc of permits < 90 days"
+    )
+p
+```
