@@ -1,0 +1,49 @@
+---
+title: "Untitled"
+format: html
+---
+
+```{r}
+library(tidyverse)
+library(sf)
+library(reticulate)
+library(dplyr)
+library(ggplot2)
+# install.packages("scale")
+# library(scale)
+# install.packages("lubridate")
+library(lubridate)
+```
+
+```{r}
+# Read geojson file
+sheds <- st_read("sheds_acs_corrected_2.geojson")
+
+# Create a subset of permits issued after 2018
+sheds_2019 <- sheds %>% 
+    filter(issued_year >= 2019)
+
+# Group by year + month: average sidewalk sheds permit duartion
+sheds_avg_m <- sheds_2019 %>%
+    mutate(after_23 = issued_year >= 2023) %>%
+    group_by(issued_year, issued_month) %>%
+    summarise(total_time = sum(renewal_time),
+        count = n(),
+        avg_time = total_time / count,
+        is_23 = is_23[1],
+        after_23 = after_23[1])
+```
+
+
+```{r}
+ggplot(sheds_avg_m) + 
+  geom_line(aes(x = lubridate::mdy(paste(issued_month, 1, issued_year)), y = avg_time, color = after_23)) + 
+  scale_x_date(breaks="month", date_labels = "%m") +
+  theme_minimal()
+
+```
+
+
+```{r}
+head(sheds_avg_m)
+```

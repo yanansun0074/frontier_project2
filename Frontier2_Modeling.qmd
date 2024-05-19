@@ -391,6 +391,7 @@ summary(sheds_acs_2)
 
 
 ```{r}
+# Get filling status / filling reason
 dob <- read.csv("DOB_Sheds_Permit_Issuance_20240425.csv")
 now <- read.csv("NOW_Sheds_Permit_Issuance_20240425.csv")
 
@@ -436,11 +437,17 @@ sheds_acs_3 <- left_join(sheds_acs_2, sheds_2) %>%
 
 ```
 
-Modeling
+```{r}
+#sheds_acs_3 <- st_read("sheds_acs_corrected_2.geojson")
+#summary(sheds_acs_3)
+```
+
+Modeling 
+* issued_year + issued_month + black percentage + poverty percentage + is it 2023 
 ```{r}
 mod_acs <- bam(renewal_time ~ s(issued_year, k = 3) + s(issued_month, bs = "cc") + s(pov_perc) + s(black_perc) + s(bs = "sz", issued_month, by = is_2023),
-    # family = nb(link = "log"), data = sheds_acs_2
-    family = Gamma(), data = sheds_acs_2
+    family = nb(link = "log"), data = sheds_acs_2
+    # family = Gamma, data = sheds_acs_2
 )
 ```
 
@@ -457,6 +464,81 @@ resid <- simulateResiduals(mod_acs)
 plot(resid, smoothScatter = FALSE)
 ```
 
+* issued_year + issued_month + black percentage + poverty percentage + is it 2023 with gamma
+
+Because gamma does not allow non-positive value, I filtered the overall dataset by renewal_time
+
+```{r}
+sheds_acs_2019 <- sheds_acs_2 %>% 
+    filter(issued_year >= 2019,
+    renewal_time >0)
+```
+
+```{r}
+mod_2 <- bam(renewal_time ~ s(issued_year, k = 3) + s(issued_month, bs = "cc") + s(pov_perc) + s(black_perc) + s(bs = "sz", issued_month, by = is_2023),
+    # family = Gamma(link = "log"), data = sheds_acs_2019
+    family = poisson(), data = sheds_acs_2019
+
+)
+```
+
+```{r}
+summary(mod_2)
+```
+
+```{r}
+plot(mod_2, seWithMean = TRUE, 
+    # trans = exp, 
+    shift = coef(mod_acs)[1], scale = 0, page = 1)
+```
+
+```{r}
+resid <- simulateResiduals(mod_acs)
+plot(resid, smoothScatter = FALSE)
+```
+
+* Time series modeling only with negative binomial and gamma
+
+```{r}
+mod_3 <- bam(renewal_time ~ s(issued_year, k = 3) + s(issued_month, bs = "cc") + s(bs = "sz", issued_month, by = is_2023),
+    family = nb(link = "log"), data = sheds_acs_2019
+    # family = Gamma(link = "log"), data = sheds_acs_2019
+)
+```
+
+```{r}
+summary(mod_3)
+```
+
+```{r}
+plot(mod_3, seWithMean = TRUE, 
+    trans = exp, 
+    shift = coef(mod_acs)[1], scale = 0, page = 1)
+```
+
+```{r}
+resid <- simulateResiduals(mod_3)
+plot(resid, smoothScatter = FALSE)
+```
+
+
+* new permit or not
+
+```{r}
+sheds_acs_3 <- sheds_acs_3 %>% mutate(status = factor(filing_status))
+summary(sheds_acs_3)
+```
+
+```{r}
+unique(sheds_acs_3$filing_status)
+```
+
+```{r}
+mod_4 <- bam(renewal_time ~ s(issued_year, k = 3) + s(bs = "sz", issued_month, by = is_2023) + status,
+    # family = nb(link = "log"), data = sheds_acs_3
+    family = Gamma(link = "log"), data = sheds_acs_3
+)
+```
 
 
 ## Percentage of permits with duration longer than 90 days

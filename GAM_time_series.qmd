@@ -1,0 +1,272 @@
+---
+title: "GAM for time series"
+format: html
+editor: visual
+---
+## GAMs for time series analysis
+Today we're going to use some simple examples to take a look at the sorts of stories we can tell off time series data when we model them using GAMs.
+Specifically, we're going to try to answer the question of what happened with property crimes in Baltimore before and after COVID. To do this, we're going to use the Part 1 Crimes data that Baltimore makes publicly avaiable on Open Baltimore, along with some Census data.
+```{r}
+library(tidyverse)
+library(units)
+library(data.table)
+library(sf)
+library(tidycensus)
+library(DHARMa)
+D_crime <- read_csv("~/Desktop/banner_projects/data/latest_part_1/Part_1_Crime_Data.csv") %>% 
+  filter(Description%in%c( "LARCENY", "BURGLARY", "LARCENY FROM AUTO")) %>%  
+  mutate(
+    date = str_sub(CrimeDateTime, 1, 10) %>% ymd,
+    year = year(date),
+    month = month(date),
+    day = day(date)
+         ) %>% 
+  filter(year>2014,
+         Latitude != 0,
+         Longitude != 0) %>% 
+  st_as_sf(coords = c("Longitude", "Latitude"))
+Bmore_acs<-get_acs(geography = "tract", state = "MD",
+                              variables=c(med_inc="B19013_001",white = "B02001_002", 
+                                          black = "B02001_003", 
+                                          poverty = "B17001_002"), geometry = T, summary_var = "B01001_001"
+                   )%>% 
+  select(-GEOID, - moe) %>% 
+  pivot_wider(names_from = "variable", values_from = "estimate") %>% 
+  mutate(
+    blk_perc = black/summary_est, 
+    wht_perc = white/summary_est, 
+    pov_rate = poverty/summary_est) %>% 
+  st_as_sf %>% 
+  st_transform(4326) %>% 
+  st_set_crs(4326) %>% 
+  filter(str_detect(NAME, "Baltimore city"))
+neighborhood_boundaries<-read_sf("~/Desktop/banner_projects/MTA_school_buses/analysis_for_greg/csa_2010_boundaries/CSA_NSA_Tracts.shp") %>% 
+  st_transform(4326) %>% 
+  st_set_crs(4326)
+st_crs(Bmore_acs)<-st_crs(neighborhood_boundaries)
+##bring in city data
+fixed_city_data_full<-read_sf( "~/Desktop/columbia_course/linearmodels/in_class_quart/Real_Property_Information (1)/Real_Property_Information.shp") %>% 
+  filter(USEGROUP%in%c("C","E","EC","R","U","I","M")) %>% 
+  st_transform(4326) %>% 
+  st_set_crs(4326) %>% 
+  st_join(neighborhood_boundaries %>% select(Neigh))
+#get the number of different coded buildings per census tract
+usegroup_by_tract<-fixed_city_data_full %>% 
+  data.frame %>% 
+  group_by(Neigh, USEGROUP) %>% 
+  summarise(n = n()) %>% 
+  pivot_wider(names_from = USEGROUP, values_from = "n") %>% 
+  mutate_all(function(x)return(replace_na(x,0))) %>% 
+  mutate(
+    total = C+E+EC+R+U+I+M,
+    perc_C = C/total,
+    perc_R = R/total,
+    Neigh = as.factor(Neigh)
+  ) 
+```
+### Data cleaning
+First, let's take a quick look at what each dataset looks like on its own.
+```{r}
+D_crime %>%
+  head(10) %>% 
+  View
+```
+Our crime data contains a lat/lon value, a description field of the crime, date and time information, as well as information about the victim of the crime. This data is victim-level, something that many people who analyze the data lose track of. We need to aggregate it to the crime level to make statements about changes in property crimes over time.
+We also have census data and neighborhood-level shapefiles that we can map the census data onto.
+```{r}
+Bmore_acs %>% 
+  head(10) %>% 
+  View
+```
+The first step is to join these two datasets together using their geometry objects. This lets us assign each crime to a census tract so that we can incorporate demographic information about surrounding neighborhood into our eventual analysis.
+```{r}
+D_neigh<-neighborhood_boundaries %>% 
+  st_join(st_centroid(Bmore_acs)) %>%  ## st join is a function that takes two spatial objects in R and joins them together with a spatial join
+  tibble %>% 
+  group_by(Neigh) %>% 
+  summarise( white = sum(white),
+             black = sum(black),
+             pop = sum(summary_est),
+             pov = sum(poverty),
+             new_mean = mean(med_inc),
+             geometry = geometry[1],
+             blk_perc = black/pop,
+             wht_perc = white/pop,
+             pov_r = pov/pop
+             ) %>% 
+  st_as_sf 
+D_crime_sf_j<-D_crime %>% 
+  st_set_crs(4326) %>% 
+  st_join(D_neigh %>% st_set_crs(4326))
+D_crime_sf_j_2<-D_crime_sf_j %>% 
+  data.frame %>% 
+  group_by(day, month, year, Neigh) %>% 
+  summarise(
+    n = n(),
+    pop = pop[1],
+    med_inc = new_mean[1],
+    blk_perc = blk_perc[1],
+    pov = pov[1]
+  ) %>% 
+  mutate(r = n/pop*100000,
+         Neigh = as.factor(Neigh),
+         date = str_c(year,"-",month,"-",day) %>% ymd,
+         dow = wday(date),
+         weekend = case_when(
+           dow%in%c(5,6,7)~"weekend",
+           dow%in%c(5,6,7)==FALSE~"weekday"
+         ) %>% as.factor
+         ) %>% 
+  left_join(usegroup_by_tract, "Neigh") %>% 
+  mutate(Neigh = as.factor(Neigh))
+D_non_viol_crime_city<-D_crime_sf_j_2 %>% 
+  group_by(day, month, year) %>% 
+  summarise(
+    n =sum(n),
+    p = sum(pop),
+    r = n/p*100000
+    ) %>%
+  mutate(
+    d = str_c(year,"-",month,"-",day) %>% ymd,
+    dow = wday(d),
+    is_weekend = case_when(
+      dow%in%c(5,6,7)~"weekend",
+      dow%in%c(5,6,7)==FALSE~"weekday"
+    )
+    ) %>% 
+  arrange(d) %>% 
+  filter(year<2024)
+```
+### EDA
+With each crime joined to a census tract, we can bring in population statistics to get a rough estimate of the crime rate by day. Let's take a look at that rate by time. The scatterplots over time show slightly decreasing levels of property crime from 2017 to 2020 which plummett and have been seemingly recovering since.
+However, because of the cyclical nature of property crime and the incredibly high levels of variation in the crime rates, it's difficult to see exactly what those trends are or how they're changing. While looking at monthly data certainly helps, how should we compare 2016 as a year against 2018, with 16's lower lows and higher highs? Converting to year is one way around this problem, but then we lose the interesting variation at the monthly level. Which months see higher property crime rates? How do monthly rates and daily rates interact? Specifically at the end of the year with X-mas.
+```{r}
+D_non_viol_crime_city %>% 
+  ggplot(aes(x = d, y =n))+
+  geom_line(size = .1)+
+  geom_smooth(size = .1)+
+  labs(x = "Date", y = "Non-violent crime rate", title = "Non-violent crime mostly stable")+
+  theme_minimal()+
+  ylim(0, 125)
+D_non_viol_crime_city %>% 
+  ungroup %>% 
+  mutate(d = str_c(year,"-",month,"-01") %>% ymd) %>% 
+  group_by(d) %>% 
+  summarise(n = sum(n)) %>% 
+  ggplot(aes(x = d, y =n))+
+  geom_line(size = .1)+
+  labs(x = "Date", y = "Non-violent crime rate", title = "Non-violent crime mostly stable")+
+  theme_minimal()+
+  ylim(0, 2500)
+D_non_viol_crime_city %>% 
+  ggplot(aes(x = is_weekend, y = n ))+
+  geom_boxplot()
+D_non_viol_crime_city %>%
+  group_by(dow) %>% 
+  summarise(n = sum(n)) %>%
+  ggplot(aes(x = dow, y =n ))+
+  geom_bar(stat = "identity")
+D_neigh %>% 
+  st_set_crs(4326) %>% 
+  st_join(D_crime %>% st_set_crs(4326)) %>% 
+  tibble %>% 
+  group_by(Neigh) %>% 
+  summarise(n = n(), pop = pop[1], geometry = geometry[1]) %>%
+  mutate(r = n/pop*100000) %>% 
+  st_as_sf %>% 
+  ggplot(aes(color = r, fill=r))+
+  geom_sf()
+```
+### Modeling
+All of the questions above can be answered with time series modeling using GAMs. As explained in lecture, one way of specifying time series models in the GAM framework is to estimate seasonal and trend components as separate smooth functions, where we specify the granularity at which we expect the trend and seasonality to occur (yearly trend with daily and monthly periods in this case), and let the R's gam estimate the periodicity in the smooth function.
+#### No covariates uncorrelated
+The simplest version of these models ignores the necessarily correlated errors and simply fits the trend and seasonal components without specifying additional covariance structure. Importantly, when we're specifying seasonal components in GAM, we want to add bs = "cc" to force the smooth functions we estimate to be the same at the lower range of their inputs as at the higher range of their inputs. While 1 and 12 seem far apart, when they're representing January and December, we want to be treating as close together.
+We also fit a separate GAM model here that estimates an interaction effect between day of the month and month of the year to see whether the periods around Christmas see more or less property crimes.
+```{r}
+mod<-gam(n~ s(year, k =3)+s(month, bs ="cc", k =)+s(day, bs ="cc")+is_weekend,
+                 family = nb(),
+    data = D_non_viol_crime_city)
+mod_ar<-gam(n~ s(year)+s(month, bs ="cc")+s(day, bs ="cc")+is_weekend,
+         family = nb(),
+         data = D_non_viol_crime_city, rho = -1)
+mod_2<-gam(n~ s(year)+te(month,day)+is_weekend,
+                 family = nb(),
+    data = D_non_viol_crime_city)
+plot(mod, seWithMean = TRUE,  trans = exp, shift = coef(mod)[1],scale =0, pages = 1)
+plot(mod_2, seWithMean = TRUE,  trans = exp, shift = coef(mod)[1],scale =0, pages = 1)
+vis.gam(mod_2, view = c("month", "day"), n.grid = 100, theta = 10, phi = 50, zlab = "",
+        ticktype = "detailed", color = "topo", main = "t2(D, W)")
+resid <- simulateResiduals(mod)
+plot(resid)
+```
+#### no covariates correlation
+```{r}
+model_w_correlated_errors <- gamm(n ~ year + s(month, bs = "cc") + s(day),
+           data = D_non_viol_crime_city, correlation = corARMA(form = ~ 1|year, p = 2))
+```
+#### model comparisons
+```{r}
+data <- 
+  rbind(
+    D_non_viol_crime_city %>% ungroup %>% select(n, d) %>% add_column(kind = "true"),
+    
+    tibble(n = model_w_correlated_errors$gam$fitted.values %>% as.numeric,
+               d = D_non_viol_crime_city$d) %>% add_column(kind = "fitted_w_err"),
+    tibble(n = mod$fitted.values %>% as.numeric,
+               d = D_non_viol_crime_city$d) %>% add_column(kind = "fitted_wo_err"),
+    
+        tibble(n = mod_2$fitted.values %>% as.numeric,
+               d = D_non_viol_crime_city$d) %>% add_column(kind = "fitted_wo_err_int"),
+    
+            tibble(n = mod_ar$fitted.values %>% as.numeric,
+               d = D_non_viol_crime_city$d) %>% add_column(kind = "fitted_ar")
+    
+    
+                        ) %>% 
+  mutate(date = ymd(d))
+                   
+data %>%
+  ggplot(aes(x = date, y = n, color = kind))+
+  geom_line(, alpha =.4)
+wo_err<-simulateResiduals(mod)
+```
+#### Adding in covariates
+```{r}
+D_crime_sf_j_2_month<-D_crime_sf_j_2 %>% 
+  group_by(month, year, Neigh) %>% 
+  summarise(
+    n = sum(n),
+    pop = pop[1],
+    med_inc = med_inc[1],
+    blk_perc = blk_perc[1],
+    pov = pov[1]
+  ) %>% 
+  mutate(r = n/pop*100000) %>% 
+  filter(year<2024) %>% 
+  left_join(usegroup_by_tract, by = "Neigh") %>% 
+  mutate(Neigh = as.factor(Neigh))
+mod_prop_crime_day<-bam(r ~ s(year)+
+                          s(month, bs="cc")+
+                          s(med_inc)+
+                          s(Neigh, bs = "re")+
+                          s(perc_C)+
+                          s(perc_R)+
+                          weekend, 
+    family =Gamma(link = "log"),
+    data = D_crime_sf_j_2)
+mod_prop_crime_day_month<-gam(r ~ 
+                                s(year, k = 8)+
+                                s(month, bs="cc")+
+                                s(med_inc)+
+                                s(Neigh, bs = "re")+
+                                s(perc_C)+
+                                s(perc_R), 
+    family =Gamma(link = "log"),
+    data = D_crime_sf_j_2_month %>% 
+      filter(perc_R>.6,
+             perc_C<.15))
+plot(mod_prop_crime_day, seWithMean = TRUE,  trans = exp, shift = coef(mod_prop_crime_day)[1],scale =0, pages = 1)
+plot(mod_prop_crime_day_month, seWithMean = TRUE,  trans = exp, shift = coef(mod_prop_crime_day_month)[1],scale =0, pages = 1)
+res_day<-simulateResiduals(mod_prop_crime_day)
+res_month<-simulateResiduals(mod_prop_crime_day_month)
+```

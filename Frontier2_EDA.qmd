@@ -3,11 +3,9 @@ title: "Frontier 2 EDA"
 format: html
 ---
 
-Cmd + Shift + I: Add new cell
 ### Number of new sidewalk shed / expired sidewalk shed permits
 ```{python}
 import pandas as pd
-
 ```
 
 ```{python}
@@ -96,23 +94,6 @@ alt.Chart(down_year).mark_line().encode(
 ```
 
 
-Time series modeling
-```{r}
-install.packages("mgcv")
-library(mgcv)
-install.packages("car")
-library(car)
-library(ggplot2)
-```
-
-```{r}
-gam_create_month <- gam(Count ~ s(Month, bs = "cr"),
-    data = month,
-    family = gaussian
-)
-```
-
-
 ## Apr 25, 2024
 
 ```{r}
@@ -172,7 +153,7 @@ NOW_S <- NOW %>% filter(
         address = paste(house_no, street_name),                                              # edit address
     )
 
-write.csv(NOW_S, "NOW_Sheds_Permit_Issuance_20240425.csv", row.names = FALSE)
+# write.csv(NOW_S, "NOW_Sheds_Permit_Issuance_20240425.csv", row.names = FALSE)
 ```
 
 
@@ -223,7 +204,7 @@ DOB_S <- DOB %>% filter(
 )
 
 # Write locally
-write.csv(DOB_S, "DOB_Sheds_Permit_Issuance_20240425.csv", row.names = FALSE)
+# write.csv(DOB_S, "DOB_Sheds_Permit_Issuance_20240425.csv", row.names = FALSE)
 ```
 
 Combine DOB + NOW data
@@ -235,7 +216,7 @@ sheds <- rbind(NOW_shed2, DOB_shed2) %>%
 
 Write combined shed data
 ```{r}
-write.csv(sheds, "Combined_Sheds_Permits.csv", row.names = FALSE)
+# write.csv(sheds, "Combined_Sheds_Permits.csv", row.names = FALSE)
 ```
 
 #### Write permits + parse created month & year
@@ -256,12 +237,10 @@ sheds.to_csv("Combined_Sheds_Permits_1.csv", index = False)
 
 ### EDA for renewal time changes
 
-```{r}
-sheds <- read.csv("Combined_Sheds_Permits.csv")
-```
-
 Each renewal time as scatter plot
 ```{r}
+sheds <- read.csv("Combined_Sheds_Permits.csv")
+
 ggplot(sheds, aes(x = issued_date, y = renew_time)) +
     geom_point() +
     theme(axis.text.x = element_text(angle = 60, hjust = 1))
